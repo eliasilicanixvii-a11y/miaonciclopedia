@@ -1,0 +1,193 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        (request.auth.token.email == "silicanielia4@gmail.com" && request.auth.token.email_verified == true)
+      );
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidString(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser() {
+      let data = request.resource.data;
+      return hasOnlyAllowedFields(['uid', 'displayName', 'email', 'photoURL', 'role', 'createdAt']) &&
+             hasRequiredFields(['uid', 'displayName', 'email', 'role', 'createdAt']) &&
+             isValidString('uid', 1, 128) &&
+             isValidString('displayName', 1, 100) &&
+             isValidEmail(data.email) &&
+             (!('photoURL' in data) || data.photoURL == '' || isValidUrl(data.photoURL)) &&
+             data.role in ['admin', 'user'] &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidArticle() {
+      let data = request.resource.data;
+      return hasOnlyAllowedFields(['id', 'title', 'slug', 'content', 'authorId', 'authorName', 'createdAt', 'updatedAt', 'purrsCount', 'hissesCount', 'tags', 'category', 'infoComment']) &&
+             hasRequiredFields(['id', 'title', 'slug', 'content', 'authorId', 'authorName', 'createdAt', 'updatedAt', 'purrsCount', 'tags']) &&
+             isValidString('id', 1, 128) &&
+             isValidString('title', 1, 200) &&
+             isValidString('slug', 1, 250) &&
+             isValidString('content', 1, 1000000) &&
+             isValidString('authorId', 1, 128) &&
+             isValidString('authorName', 1, 100) &&
+             isValidDateString(data.createdAt) &&
+             isValidDateString(data.updatedAt) &&
+             data.purrsCount is number &&
+             (!('hissesCount' in data) || data.hissesCount is number) &&
+             (!('category' in data) || isValidString('category', 1, 50)) &&
+             (!('infoComment' in data) || isValidString('infoComment', 0, 5000)) &&
+             data.tags is list && data.tags.size() <= 20;
+    }
+
+    function isValidPurr() {
+      let data = request.resource.data;
+      return hasOnlyAllowedFields(['userId', 'articleId', 'createdAt']) &&
+             hasRequiredFields(['userId', 'articleId', 'createdAt']) &&
+             isValidString('userId', 1, 128) &&
+             isValidString('articleId', 1, 128) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidHiss() {
+      let data = request.resource.data;
+      return hasOnlyAllowedFields(['userId', 'articleId', 'createdAt']) &&
+             hasRequiredFields(['userId', 'articleId', 'createdAt']) &&
+             isValidString('userId', 1, 128) &&
+             isValidString('articleId', 1, 128) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidComment() {
+      let data = request.resource.data;
+      return hasOnlyAllowedFields(['articleId', 'authorId', 'authorName', 'authorPhoto', 'content', 'createdAt']) &&
+             hasRequiredFields(['articleId', 'authorId', 'authorName', 'content', 'createdAt']) &&
+             isValidString('articleId', 1, 128) &&
+             isValidString('authorId', 1, 128) &&
+             isValidString('authorName', 1, 100) &&
+             isValidString('content', 1, 2000) &&
+             (!('authorPhoto' in data) || data.authorPhoto == '' || isValidUrl(data.authorPhoto)) &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isInteractionUpdate() {
+      let affected = request.resource.data.diff(resource.data).affectedKeys();
+      // Allow updating only purrsCount and/or hissesCount
+      return affected.hasOnly(['purrsCount', 'hissesCount']);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if isOwner(userId) && isValidUser() && uidUnchanged() && 
+                    ((request.resource.data.role == 'user') || isAdmin());
+      allow update: if isValidUser() && uidNotModified() && 
+                    (
+                      (isOwner(userId) && request.resource.data.role == resource.data.role && request.resource.data.createdAt == resource.data.createdAt) || 
+                      isAdmin()
+                    );
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /articles/{articleId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidArticle() && 
+                    (request.resource.data.authorId == request.auth.uid || (isAdmin() && request.resource.data.authorId == 'system')) &&
+                    request.resource.data.purrsCount == 0;
+      allow update: if isAuthenticated() && (
+                      (
+                        (request.resource.data.authorId == resource.data.authorId || isAdmin()) && 
+                        request.resource.data.createdAt == resource.data.createdAt &&
+                        (request.auth.uid == resource.data.authorId || isAdmin()) &&
+                        isValidArticle()
+                      ) ||
+                      isInteractionUpdate()
+                    );
+      allow delete: if isAuthenticated() && (request.auth.uid == resource.data.authorId || isAdmin());
+    }
+
+    match /purrs/{purrId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidPurr() && 
+                    purrId == request.auth.uid + '_' + request.resource.data.articleId &&
+                    request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    match /hisses/{hissId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidHiss() && 
+                    hissId == request.auth.uid + '_' + request.resource.data.articleId &&
+                    request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    match /comments/{commentId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidComment() && request.resource.data.authorId == request.auth.uid;
+      allow delete: if isAuthenticated() && (resource.data.authorId == request.auth.uid || isAdmin());
+      allow update: if false;
+    }
+
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
